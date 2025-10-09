@@ -1,5 +1,13 @@
 <script setup lang="ts">
 import { ref } from 'vue'
+import PouchDB from 'pouchdb'
+
+mounted() {
+    this.initDatabase()
+    this.fetchData()
+}
+
+const db = new PouchDB('http://admin:admin@localhost:5984/infra_53_0850%27');
 
 const counter =ref(120);
 
