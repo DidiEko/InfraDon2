@@ -1,55 +1,66 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue';
+import { onMounted, ref } from 'vue'
 import PouchDB from 'pouchdb'
-
-declare interface Post {
-  post_name: string;
-  post_content: string;
-  attributes: {
-    creation_date: any;
-  };
+ 
+// Définition du type de données
+interface Character {
+  name: string;
+  age: number;
+  affiliation: string;
+  lightsaber: boolean;
 }
-
+ 
 // Référence à la base de données
-const storage = ref()
-// Données stockées
-const postsData = ref<Post[]>([])
-
+const storage = ref<any>(null)
+const characters = ref<Character[]>([])
+ 
 // Initialisation de la base de données
 const initDatabase = () => {
   console.log('=> Connexion à la base de données');
   const db = new PouchDB('http://admin:admin@localhost:5984/database')
-  if (db) {
-    console.log("Connecté à la collection : " + db?.name)
-    storage.value = db
-  } else {
-    console.warn('Echec lors de la connexion à la base de données')
+  storage.value = db
+  console.log("Connecté à la collection :", db?.name)
+}
+ 
+// Récupération des données
+const fetchData = async () => {
+  if (!storage.value) return
+ 
+  try {
+    // Récupère tous les documents de la base
+    const result = await storage.value.allDocs({ include_docs: true })
+    console.log('=> Données récupérées :', result)
+ 
+    // On parcourt chaque document et on extrait le tableau "characters"
+    const allCharacters: Character[] = result.rows.flatMap((row: any) => row.doc.characters || [])
+    characters.value = allCharacters
+ 
+  } catch (err) {
+    console.error('Erreur lors de la récupération :', err)
   }
 }
-
-// Récupération des données
-const fetchData = () => {
-  // TODO Récupération des données
-  // https://pouchdb.com/api.html#batch_fetch
-  // Regarder l'exemple avec function allDocs
-  // Remplir le tableau postsData avec les données récupérées
-}
-
+ 
 onMounted(() => {
-  console.log('=> Composant initialisé');
   initDatabase()
   fetchData()
-});
-
+})
 </script>
-
+ 
 <template>
-  <h1>Fetch Data</h1>
-  <article v-for="post in postsData" v-bind:key="(post as any).id">
-    <h2>{{ post.post_name }}</h2>
-    <p>{{ post.post_content }}</p>
+  <h1>Liste des personnages</h1>
+ 
+  <article v-for="(char, index) in characters" :key="index" class="p-4 border-b">
+    <h2>{{ char.name }}</h2>
+    <p>Âge : {{ char.age }}</p>
+    <p>Affiliation : {{ char.affiliation }}</p>
+    <p>Sabre laser : {{ char.lightsaber ? 'Oui' : 'Non' }}</p>
   </article>
 </template>
+ 
+ 
+ 
+ 
+ 
 
 
 
