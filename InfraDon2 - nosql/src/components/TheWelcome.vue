@@ -19,7 +19,7 @@ const postsData = ref<Post[]>([])
 // Initialisation de la base de données
 const initDatabase = () => {
   console.log('=> Connexion à la base de données');
-  const db = new PouchDB('http://admin:Ilovecash1925@localhost:5984/infrandon2_db1')
+  const db = new PouchDB('http://admin:170451@localhost:5984/infradon2-eko')
   if (db) {
     console.log("Connecté à la collection : " + db?.name)
     storage.value = db
@@ -37,6 +37,7 @@ const fetchData = async () => {
  
   try {
     const result = await storage.value.allDocs({ include_docs: true })
+    console.log(result)
     postsData.value = result.rows.map(row => row.doc)
     console.log('Documents récupérés :', postsData.value)
   } catch (error) {
