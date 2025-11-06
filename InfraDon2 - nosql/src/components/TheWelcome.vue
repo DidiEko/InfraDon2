@@ -11,11 +11,11 @@ declare interface Post {
   attributes: string[]
 }
 
-// Référence à la base
+// 📂 Références globales
 const storage = ref<any>(null)
 const postsData = ref<Post[]>([])
 
-// 📋 Formulaire d'ajout/modification
+// 📝 Formulaire d'ajout/modification
 const newPost = ref<Post>({
   post_name: '',
   post_content: '',
@@ -26,19 +26,38 @@ const newPost = ref<Post>({
 const isEditing = ref(false)
 const selectedPost = ref<Post | null>(null)
 
-// ✅ Connexion à la base
+// ✅ Initialisation de la base et synchronisation
 const initDatabase = () => {
-  console.log('=> Connexion à la base de données')
-  const db = new PouchDB('http://admin:170451@localhost:5984/infradon2-eko')
-  if (db) {
-    console.log('Connecté à la collection : ' + db.name)
-    storage.value = db
-  } else {
-    console.warn('Échec lors de la connexion à la base de données')
-  }
+  console.log('=> Initialisation de la base locale PouchDB')
+
+  // Base locale (créée automatiquement dans le navigateur)
+  const db = new PouchDB('infradon2-eko')
+
+  // Base distante (CouchDB serveur)
+  const remoteCouch = 'http://admin:170451@localhost:5984/infradon2-eko'
+
+  // Stocker la référence locale
+  storage.value = db
+
+  console.log('📦 Base locale prête : infradon2-eko')
+
+  // 🔄 Réplication bidirectionnelle continue
+  db.sync(remoteCouch, {
+    live: true,
+    retry: true
+  })
+    .on('change', info => {
+      console.log('🟢 Changement détecté :', info)
+      fetchData()
+    })
+    .on('paused', err => console.log('⏸️ Synchro en pause', err || ''))
+    .on('active', () => console.log('▶️ Synchro reprise'))
+    .on('error', err => console.error('❌ Erreur de synchronisation :', err))
+
+  console.log('🌍 Synchronisation CouchDB ↔️ PouchDB activée')
 }
 
-// 📥 Récupération des données
+// 📥 Récupération des données locales
 const fetchData = async () => {
   if (!storage.value) {
     console.warn('Base de données non initialisée')
@@ -54,7 +73,7 @@ const fetchData = async () => {
   }
 }
 
-// ➕ Ajout d'un nouveau document dans la base
+// ➕ Ajout d’un document
 const addPost = async () => {
   if (!storage.value) return
 
@@ -71,11 +90,11 @@ const addPost = async () => {
     resetForm()
     await fetchData()
   } catch (error) {
-    console.error('❌ Erreur lors de lajout :', error)
+    console.error('❌ Erreur lors de l’ajout :', error)
   }
 }
 
-// 🎯 Sélectionner un document pour modification
+// 🎯 Sélection pour modification
 const selectPost = (post: Post) => {
   isEditing.value = true
   selectedPost.value = post
@@ -87,7 +106,7 @@ const selectPost = (post: Post) => {
   console.log('🎯 Document sélectionné pour modification :', post)
 }
 
-// ✏️ Modifier un document existant
+// ✏️ Modification d’un document
 const updatePost = async () => {
   if (!storage.value || !selectedPost.value) return
 
@@ -109,7 +128,7 @@ const updatePost = async () => {
   }
 }
 
-// 🗑️ Supprimer un document
+// 🗑️ Suppression d’un document
 const deletePost = async (post: Post) => {
   if (!storage.value || !confirm('Êtes-vous sûr de vouloir supprimer ce document ?')) return
 
@@ -133,7 +152,7 @@ const resetForm = () => {
   selectedPost.value = null
 }
 
-// 📤 Gestion de la soumission (ajouter ou modifier)
+// 📤 Gérer la soumission (ajouter ou modifier)
 const handleSubmit = () => {
   if (isEditing.value) {
     updatePost()
@@ -142,30 +161,30 @@ const handleSubmit = () => {
   }
 }
 
+// 🧩 Montage du composant
 onMounted(() => {
-  console.log('=> Composant initialisé')
+  console.log('🚀 Composant initialisé')
   initDatabase()
   fetchData()
+
+  // 👂 Surveiller les changements locaux
+  storage.value?.changes({
+    since: 'now',
+    live: true,
+    include_docs: true
+  }).on('change', fetchData)
 })
 </script>
 
 <template>
   <div class="container">
-    <h1>📡 CouchDB + Vue 3 - CRUD Complet</h1>
+    <h1>📡 CouchDB + Vue 3 - CRUD + Réplication</h1>
 
-    <!-- 📝 Formulaire d'ajout/modification -->
+    <!-- 📝 Formulaire -->
     <div class="form">
       <h2>{{ isEditing ? '✏️ Modifier' : '➕ Ajouter' }} une personne</h2>
-      <input
-        v-model="newPost.post_name"
-        placeholder="Nom"
-        type="text"
-      />
-      <input
-        v-model="newPost.post_content"
-        placeholder="Contenu / Description"
-        type="text"
-      />
+      <input v-model="newPost.post_name" placeholder="Nom" type="text" />
+      <input v-model="newPost.post_content" placeholder="Contenu / Description" type="text" />
       <input
         v-model="newPost.attributes"
         placeholder="Attributs séparés par des virgules"
@@ -185,7 +204,7 @@ onMounted(() => {
 
     <hr />
 
-    <!-- 📃 Liste des documents -->
+    <!-- 📃 Liste -->
     <div v-if="postsData.length === 0">
       <p>Aucune donnée trouvée.</p>
     </div>
@@ -201,12 +220,8 @@ onMounted(() => {
       <p>Attributs : {{ post.attributes.join(', ') }}</p>
       
       <div class="actions">
-        <button @click="selectPost(post)" class="btn-edit">
-          ✏️ Modifier
-        </button>
-        <button @click="deletePost(post)" class="btn-delete">
-          🗑️ Supprimer
-        </button>
+        <button @click="selectPost(post)" class="btn-edit">✏️ Modifier</button>
+        <button @click="deletePost(post)" class="btn-delete">🗑️ Supprimer</button>
       </div>
     </article>
   </div>
