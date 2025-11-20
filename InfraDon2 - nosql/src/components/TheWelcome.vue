@@ -1,77 +1,117 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
-import PouchDB from 'pouchdb'
-import PouchDBFind from 'pouchdb-find'
+import { ref, onMounted } from "vue"
+import PouchDB from "pouchdb"
+import PouchDBFind from "pouchdb-find"
 
-// Activation plugin find()
+// Plugin PouchDB-find
 PouchDB.plugin(PouchDBFind)
 
-// --- TYPES ---------------------------------------------------------
-declare interface Post {
+// ------------------ TYPES ------------------
+interface Post {
   _id?: string
   _rev?: string
   post_name: string
   post_content: string
   attributes: string[]
+  created_at?: string
+  updated_at?: string
 }
 
-// --- STATE ---------------------------------------------------------
+// ------------------ STATE ------------------
 const storage = ref<any>(null)
 const postsData = ref<Post[]>([])
-const searchTerm = ref("") // 🔍 Recherche indexée
+const searchTerm = ref("")
+const online = ref(true)
 
-// Formulaire
+const syncing = ref(false)
+
 const newPost = ref<Post>({
-  post_name: '',
-  post_content: '',
+  post_name: "",
+  post_content: "",
   attributes: []
 })
 
 const isEditing = ref(false)
 const selectedPost = ref<Post | null>(null)
 
-// URL serveur CouchDB
+// URL CouchDB
 const remoteCouch = "http://admin:170451@localhost:5984/infradon2-eko"
 
-// --- INIT DB -------------------------------------------------------
+let syncHandler: any = null
+
+// ------------------ INIT DB ------------------
 const initDatabase = async () => {
-  console.log("📦 Initialisation DB locale...")
   const db = new PouchDB("infradon2-eko")
   storage.value = db
 
-  // 🔍 INDEX sur post_name
+  // INDEXATION
   await db.createIndex({
     index: { fields: ["post_name"] }
   })
-  console.log("🔍 Index créé sur 'post_name'")
+  console.log("🔍 Index 'post_name' OK")
 
-  // SYNC LIVE
-  db.sync(remoteCouch, { live: true, retry: true })
-    .on("change", fetchData)
-    .on("error", console.error)
+  // LIVE SYNC si online
+  if (online.value) startLiveSync()
 }
 
-// --- FETCH ----------------------------------------------------------
+// ------------------ LIVE SYNC ------------------
+const startLiveSync = () => {
+  console.log("🌍 LIVE SYNC ACTIVÉ")
+  syncing.value = true
+
+  syncHandler = storage.value
+    .sync(remoteCouch, { live: true, retry: true })
+    .on("change", fetchData)
+    .on("paused", () => console.log("⏸️ Pause sync"))
+    .on("active", () => console.log("▶️ Sync reprise"))
+    .on("error", (err: any) => console.error("❌ Sync error", err))
+}
+
+const stopLiveSync = () => {
+  console.log("🛑 LIVE SYNC STOP")
+  syncing.value = false
+  syncHandler?.cancel()
+}
+
+// ------------------ ONLINE/OFFLINE ------------------
+const toggleOnline = async () => {
+  online.value = !online.value
+
+  if (online.value) {
+    startLiveSync()
+    await manualSync()
+  } else {
+    stopLiveSync()
+  }
+}
+
+// ------------------ FETCH ------------------
 const fetchData = async () => {
   const result = await storage.value.allDocs({ include_docs: true })
-  postsData.value = result.rows.map(r => r.doc)
+
+  postsData.value = result.rows
+    .map((r: any) => r.doc)
+    .sort((a: any, b: any) => new Date(b.created_at) - new Date(a.created_at))
 }
 
-// --- RECHERCHE ------------------------------------------------------
+// ------------------ SEARCH (INDEXED) ------------------
 const searchByName = async () => {
-  if (searchTerm.value.trim() === "") return fetchData()
+  if (searchTerm.value.trim() === "") {
+    return fetchData()
+  }
 
-  const result = await storage.value.find({
-    selector: { post_name: searchTerm.value }
-  })
+  const selector =
+    searchTerm.value.length < 3
+      ? { post_name: searchTerm.value } // Exact (cours)
+      : { post_name: { $regex: `^${searchTerm.value}` } } // Partiel
+
+  const result = await storage.value.find({ selector })
 
   postsData.value = result.docs
 }
 
-// --- FACTORY --------------------------------------------------------
+// ------------------ FACTORY ------------------
 const generateFake = async (n = 50) => {
-  if (!storage.value) return
-
   const docs = []
   const base = Date.now()
 
@@ -79,23 +119,25 @@ const generateFake = async (n = 50) => {
     docs.push({
       _id: `fake_${base}_${i}`,
       post_name: `Personne ${i}`,
-      post_content: `Contenu automatique ${i}`,
-      attributes: ["fake", "auto", `groupe_${i}`]
+      post_content: `Contenu généré automatiquement`,
+      attributes: ["fake", `groupe_${i}`],
+      created_at: new Date().toISOString()
     })
   }
 
   await storage.value.bulkDocs(docs)
-  console.log(`🧪 ${n} documents générés`)
   fetchData()
+  console.log(`🧪 ${n} documents générés`)
 }
 
-// --- CRUD ------------------------------------------------------------
+// ------------------ CRUD ------------------
 const addPost = async () => {
   const doc = {
     _id: new Date().toISOString(),
     post_name: newPost.value.post_name,
     post_content: newPost.value.post_content,
-    attributes: newPost.value.attributes
+    attributes: newPost.value.attributes,
+    created_at: new Date().toISOString()
   }
 
   await storage.value.put(doc)
@@ -122,7 +164,9 @@ const updatePost = async () => {
     _rev: selectedPost.value._rev,
     post_name: newPost.value.post_name,
     post_content: newPost.value.post_content,
-    attributes: newPost.value.attributes
+    attributes: newPost.value.attributes,
+    created_at: selectedPost.value.created_at,
+    updated_at: new Date().toISOString()
   }
 
   await storage.value.put(doc)
@@ -145,7 +189,7 @@ const handleSubmit = () => {
   isEditing.value ? updatePost() : addPost()
 }
 
-// --- REPLICATION MANUELLE -------------------------------------------
+// ------------------ REPLICATION MANUELLE ------------------
 const replicateFromDistant = async () => {
   await storage.value.replicate.from(remoteCouch)
   fetchData()
@@ -160,7 +204,7 @@ const manualSync = async () => {
   await replicateToDistant()
 }
 
-// --- MOUNT ----------------------------------------------------------
+// ------------------ MOUNT ------------------
 onMounted(async () => {
   await initDatabase()
   fetchData()
@@ -170,7 +214,18 @@ onMounted(async () => {
 <template>
   <div class="app">
 
-    <h1>📡 CouchDB + Vue 3 — CRUD + Index + Recherche</h1>
+    <h1>📡 CouchDB + Vue 3 — CRUD + Index + Recherche + Sync + Factory</h1>
+
+    <!-- ONLINE/OFFLINE -->
+    <section class="status-bar">
+      <span :class="online ? 'online' : 'offline'">
+        ● {{ online ? "ONLINE (sync actif)" : "OFFLINE (local uniquement)" }}
+      </span>
+
+      <button @click="toggleOnline" class="secondary small">
+        Passer en mode {{ online ? 'OFFLINE' : 'ONLINE' }}
+      </button>
+    </section>
 
     <!-- 🔍 Recherche indexée -->
     <section class="search-bar">
@@ -179,14 +234,14 @@ onMounted(async () => {
         @input="searchByName"
         placeholder="Rechercher par nom..."
       />
-      <button @click="generateFake(50)">Générer 50 docs</button>
+      <button @click="generateFake(50)">+50 docs</button>
     </section>
 
     <!-- 🔁 Sync -->
     <div class="sync-buttons">
       <button class="sync-btn" @click="replicateFromDistant">⬇️ Distant → Local</button>
       <button class="sync-btn" @click="replicateToDistant">⬆️ Local → Distant</button>
-      <button class="sync-btn" @click="manualSync">🔁 Sync (2 sens)</button>
+      <button class="sync-btn" @click="manualSync">🔁 Sync 2 Sens</button>
     </div>
 
     <!-- FORM -->
@@ -212,21 +267,18 @@ onMounted(async () => {
       </div>
     </section>
 
-    <!-- LIST -->
+    <!-- LISTE -->
     <section class="card">
       <h2>📃 Documents</h2>
 
       <p v-if="postsData.length === 0">Aucun document.</p>
 
-      <article
-        v-for="post in postsData"
-        :key="post._id"
-        class="doc"
-      >
+      <article v-for="post in postsData" :key="post._id" class="doc">
         <div>
           <h3>{{ post.post_name }}</h3>
           <p>{{ post.post_content }}</p>
-          <small>ID: {{ post._id }}</small>
+          <small>ID: {{ post._id }}</small><br />
+          <small v-if="post.updated_at">🔄 Maj: {{ post.updated_at }}</small>
         </div>
 
         <div class="btn-row">
@@ -250,6 +302,17 @@ onMounted(async () => {
 }
 
 h1, h2 { margin-bottom: 1rem; }
+
+/* === STATUS BAR === */
+.status-bar {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 1rem;
+  align-items: center;
+}
+
+.online { color: #42b883; }
+.offline { color: #ff4d4d; }
 
 /* === SEARCH BAR === */
 .search-bar {
@@ -283,7 +346,6 @@ h1, h2 { margin-bottom: 1rem; }
   font-weight: 600;
 }
 .sync-btn:last-child { border-right: none; }
-.sync-btn:hover { background: #c9c9c9; }
 
 /* === CARDS === */
 .card {
@@ -300,9 +362,9 @@ input {
   padding: 0.6rem;
   margin-bottom: 0.8rem;
   border-radius: 6px;
-  border: 1px solid #444;
   background: #111;
   color: white;
+  border: 1px solid #444;
 }
 
 /* === BUTTONS === */
@@ -314,6 +376,7 @@ button {
   font-weight: 500;
 }
 
+/* === STYLES DES BOUTONS === */
 .primary { background: #42b883; }
 .primary:hover { background: #2a9d6e; }
 
@@ -325,10 +388,7 @@ button {
 
 .small { font-size: 0.8rem; padding: 0.4rem 0.7rem; }
 
-.btn-row {
-  display: flex;
-  gap: 0.5rem;
-}
+.btn-row { display: flex; gap: 0.5rem; }
 
 /* === DOC LIST === */
 .doc {
