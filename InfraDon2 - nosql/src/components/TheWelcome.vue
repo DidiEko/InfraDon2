@@ -1,8 +1,11 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 import PouchDB from 'pouchdb'
+import PouchDBFind from 'pouchdb-find'
 
-// 📌 Structure du document
+PouchDB.plugin(PouchDBFind)
+
+// --- TYPES ---------------------------------------------------------
 declare interface Post {
   _id?: string
   _rev?: string
@@ -11,107 +14,95 @@ declare interface Post {
   attributes: string[]
 }
 
-// 📂 Références globales
+// --- STATE ---------------------------------------------------------
 const storage = ref<any>(null)
 const postsData = ref<Post[]>([])
+const online = ref(true)              // 👈 MODE ONLINE / OFFLINE
+const searchTerm = ref('')            // 👈 Recherche
 
-// 📝 Formulaire d'ajout/modification
+// Formulaire
 const newPost = ref<Post>({
   post_name: '',
   post_content: '',
   attributes: []
 })
 
-// 🎯 Mode édition
 const isEditing = ref(false)
 const selectedPost = ref<Post | null>(null)
 
-// 🌍 URL serveur CouchDB
+// DB distante
 const remoteCouch = 'http://admin:170451@localhost:5984/infradon2-eko'
 
-// ✅ Initialisation de la base et synchronisation live
-const initDatabase = () => {
-  console.log('=> Initialisation de la base locale PouchDB')
-
+// --- INIT DB -------------------------------------------------------
+const initDatabase = async () => {
   const db = new PouchDB('infradon2-eko')
   storage.value = db
 
-  console.log('📦 Base locale prête : infradon2-eko')
+  console.log('📦 Local DB OK')
 
-  // 🔄 Synchronisation automatique bidirectionnelle
-  db.sync(remoteCouch, { live: true, retry: true })
-    .on('change', info => {
-      console.log('🟢 Changement détecté (sync auto) :', info)
-      fetchData()
-    })
-    .on('paused', err => console.log('⏸️ Synchro en pause', err || ''))
-    .on('active', () => console.log('▶️ Synchro reprise'))
-    .on('error', err => console.error('❌ Erreur de synchronisation :', err))
+  // Créer un index sur "post_name" (pour la recherche)
+  await db.createIndex({
+    index: { fields: ['post_name'] }
+  })
+  console.log('🔍 Index créé sur post_name')
 
-  console.log('🌍 Synchronisation CouchDB ↔️ PouchDB activée')
+  if (online.value) startLiveSync()
 }
 
-// 📥 Récupération des données locales
+// --- LIVE SYNC -----------------------------------------------------
+let syncHandler: any = null
+
+const startLiveSync = () => {
+  if (!online.value) return
+
+  console.log('🌍 LIVE SYNC ACTIVÉ')
+
+  syncHandler = storage.value
+    .sync(remoteCouch, { live: true, retry: true })
+    .on('change', fetchData)
+    .on('error', console.error)
+}
+
+const stopLiveSync = () => {
+  console.log('🛑 LIVE SYNC STOP')
+  syncHandler?.cancel()
+}
+
+// --- ONLINE / OFFLINE ----------------------------------------------
+const toggleOnline = async () => {
+  online.value = !online.value
+
+  if (online.value) {
+    startLiveSync()
+    await manualSync()
+  } else {
+    stopLiveSync()
+  }
+}
+
+// --- FETCH ----------------------------------------------------------
 const fetchData = async () => {
-  if (!storage.value) return console.warn('Base non initialisée')
-
-  try {
-    const result = await storage.value.allDocs({ include_docs: true })
-    postsData.value = result.rows.map((row: any) => row.doc)
-    console.log('📥 Documents récupérés :', postsData.value)
-  } catch (error) {
-    console.error('❌ Erreur lors de la récupération :', error)
-  }
-}
-
-// 🔁 Réplication DISTANT → LOCAL (bouton)
-const replicateFromDistant = async () => {
   if (!storage.value) return
 
-  console.log('⬇️ Réplication DISTANT → LOCAL...')
-  try {
-    const result = await storage.value.replicate.from(remoteCouch)
-    console.log('✅ Réplication depuis serveur :', result)
-    fetchData()
-  } catch (err) {
-    console.error('❌ Erreur replicateFromDistant :', err)
+  const result = await storage.value.allDocs({ include_docs: true })
+  postsData.value = result.rows.map(r => r.doc)
+}
+
+// --- RECHERCHE ------------------------------------------------------
+const onSearchInput = async () => {
+  if (!searchTerm.value) {
+    return fetchData()
   }
+
+  const result = await storage.value.find({
+    selector: { post_name: { $eq: searchTerm.value } }
+  })
+
+  postsData.value = result.docs
 }
 
-// 🔁 Réplication LOCAL → DISTANT (bouton)
-const replicateToDistant = async () => {
-  if (!storage.value) return
-
-  console.log('⬆️ Réplication LOCAL → DISTANT...')
-  try {
-    const result = await storage.value.replicate.to(remoteCouch)
-    console.log('✅ Réplication vers serveur :', result)
-  } catch (err) {
-    console.error('❌ Erreur replicateToDistant :', err)
-  }
-}
-
-// 👂 Watch des changements DISTANTS (serveur CouchDB)
-const watchDistantChanges = () => {
-  const remote = new PouchDB(remoteCouch)
-
-  remote
-    .changes({
-      since: 'now',
-      live: true,
-      include_docs: true
-    })
-    .on('change', info => {
-      console.log('🌍 Changement distant détecté :', info)
-      fetchData()
-    })
-    .on('error', err => console.error('❌ Erreur watch distant :', err))
-}
-
-// ➕ Ajout d’un document
+// --- CRUD ------------------------------------------------------------
 const addPost = async () => {
-  if (!storage.value) return
-
   const doc = {
     _id: new Date().toISOString(),
     post_name: newPost.value.post_name,
@@ -119,17 +110,11 @@ const addPost = async () => {
     attributes: newPost.value.attributes
   }
 
-  try {
-    await storage.value.put(doc)
-    console.log('✅ Document ajouté :', doc)
-    resetForm()
-    fetchData()
-  } catch (error) {
-    console.error('❌ Erreur ajout :', error)
-  }
+  await storage.value.put(doc)
+  resetForm()
+  fetchData()
 }
 
-// 🎯 Sélection pour modification
 const selectPost = (post: Post) => {
   isEditing.value = true
   selectedPost.value = post
@@ -139,13 +124,10 @@ const selectPost = (post: Post) => {
     post_content: post.post_content,
     attributes: [...post.attributes]
   }
-
-  console.log('🎯 Document en édition :', post)
 }
 
-// ✏️ Modification d’un document
 const updatePost = async () => {
-  if (!storage.value || !selectedPost.value) return
+  if (!selectedPost.value) return
 
   const doc = {
     _id: selectedPost.value._id,
@@ -155,182 +137,210 @@ const updatePost = async () => {
     attributes: newPost.value.attributes
   }
 
-  try {
-    await storage.value.put(doc)
-    console.log('✏️ Document modifié :', doc)
-    resetForm()
-    fetchData()
-  } catch (error) {
-    console.error('❌ Erreur modification :', error)
-  }
+  await storage.value.put(doc)
+  resetForm()
+  fetchData()
 }
 
-// 🗑️ Suppression d’un document
 const deletePost = async (post: Post) => {
-  if (!storage.value || !confirm('Supprimer ce document ?')) return
-
-  try {
-    await storage.value.remove(post._id, post._rev)
-    console.log('🗑️ Document supprimé :', post)
-    fetchData()
-  } catch (error) {
-    console.error('❌ Erreur suppression :', error)
-  }
+  await storage.value.remove(post._id, post._rev)
+  fetchData()
 }
 
-// 🔄 Réinitialiser formulaire
 const resetForm = () => {
   newPost.value = { post_name: '', post_content: '', attributes: [] }
   isEditing.value = false
   selectedPost.value = null
 }
 
-// 📤 Gérer la soumission du formulaire
 const handleSubmit = () => {
   isEditing.value ? updatePost() : addPost()
 }
 
-// 🚀 Montage du composant
-onMounted(() => {
-  console.log('🚀 Composant initialisé')
-  initDatabase()
+// --- SYNC MANUEL ----------------------------------------------------
+const replicateFromDistant = async () => {
+  await storage.value.replicate.from(remoteCouch)
   fetchData()
-  watchDistantChanges() // 👈 ajout important
+}
+
+const replicateToDistant = async () => {
+  await storage.value.replicate.to(remoteCouch)
+}
+
+const manualSync = async () => {
+  await replicateFromDistant()
+  await replicateToDistant()
+}
+
+// --- MOUNT ----------------------------------------------------------
+onMounted(async () => {
+  await initDatabase()
+  fetchData()
 })
 </script>
 
 <template>
-  <div class="container">
-    <h1>📡 CouchDB + Vue 3 - CRUD + Réplication</h1>
+  <div class="app">
 
-    <!-- 🔁 Boutons de réplication -->
-    <div class="button-group" style="margin-bottom: 1rem;">
-      <button @click="replicateFromDistant" class="btn-secondary">⬇️ Sync From Server</button>
-      <button @click="replicateToDistant" class="btn-secondary">⬆️ Sync To Server</button>
+    <!-- HEADER -->
+    <header>
+      <h1>📡 CouchDB + Vue 3 — CRUD + Sync + Search</h1>
+
+      <div class="status-bar">
+        <span :class="online ? 'online' : 'offline'">
+          {{ online ? "ONLINE" : "OFFLINE" }}
+        </span>
+
+        <button @click="toggleOnline">
+          Passer en mode {{ online ? "OFFLINE" : "ONLINE" }}
+        </button>
+      </div>
+    </header>
+
+    <!-- SEARCH -->
+    <section class="card">
+      <h2>🔍 Recherche (post_name)</h2>
+      <input
+        v-model="searchTerm"
+        @input="onSearchInput"
+        placeholder="Nom exact..."
+      />
+    </section>
+
+    <!-- SYNC BUTTONS -->
+    <div class="sync-row">
+      <button @click="replicateFromDistant">⬇ Distant → Local</button>
+      <button @click="replicateToDistant">⬆ Local → Distant</button>
+      <button @click="manualSync">🔁 Sync (2 sens)</button>
     </div>
 
-    <!-- 📝 Formulaire -->
-    <div class="form">
-      <h2>{{ isEditing ? '✏️ Modifier' : '➕ Ajouter' }} une personne</h2>
+    <!-- FORM -->
+    <section class="card">
+      <h2>{{ isEditing ? "✏ Modifier" : "➕ Ajouter" }} une personne</h2>
 
-      <input v-model="newPost.post_name" placeholder="Nom" type="text" />
-      <input v-model="newPost.post_content" placeholder="Contenu / Description" type="text" />
-
+      <input v-model="newPost.post_name" placeholder="Nom" />
+      <input v-model="newPost.post_content" placeholder="Contenu" />
       <input
         v-model="newPost.attributes"
-        placeholder="Attributs séparés par une virgule"
-        type="text"
-        @input="newPost.attributes = ($event.target as HTMLInputElement).value.split(',')"
+        placeholder="Attributs (séparés par virgule)"
+        @input="newPost.attributes = $event.target.value.split(',')"
       />
 
-      <div class="button-group">
-        <button @click="handleSubmit" class="btn-primary">
-          {{ isEditing ? '✏️ Modifier' : '➕ Ajouter' }}
+      <div class="btn-row">
+        <button @click="handleSubmit" class="primary">
+          {{ isEditing ? "Enregistrer" : "Créer" }}
         </button>
-        <button v-if="isEditing" @click="resetForm" class="btn-secondary">❌ Annuler</button>
+
+        <button v-if="isEditing" @click="resetForm" class="secondary">
+          Annuler
+        </button>
       </div>
-    </div>
+    </section>
 
-    <hr />
+    <!-- LIST -->
+    <section class="card">
+      <h2>📃 Documents</h2>
 
-    <!-- 📃 Liste -->
-    <div v-if="postsData.length === 0">
-      <p>Aucune donnée trouvée.</p>
-    </div>
+      <p v-if="postsData.length === 0">Aucun document.</p>
 
-    <article
-      v-for="post in postsData"
-      :key="post._id"
-      class="item"
-      :class="{ selected: selectedPost?._id === post._id }"
-    >
-      <h2>{{ post.post_name }}</h2>
-      <p>{{ post.post_content }}</p>
-      <p>Attributs : {{ post.attributes.join(', ') }}</p>
+      <article
+        v-for="post in postsData"
+        :key="post._id"
+        class="doc"
+      >
+        <div>
+          <h3>{{ post.post_name }}</h3>
+          <p>{{ post.post_content }}</p>
+          <small>ID: {{ post._id }}</small>
+        </div>
 
-      <div class="actions">
-        <button @click="selectPost(post)" class="btn-edit">✏️ Modifier</button>
-        <button @click="deletePost(post)" class="btn-delete">🗑️ Supprimer</button>
-      </div>
-    </article>
+        <div class="btn-row">
+          <button @click="selectPost(post)" class="primary small">Modifier</button>
+          <button @click="deletePost(post)" class="danger small">Supprimer</button>
+        </div>
+      </article>
+
+    </section>
+
   </div>
 </template>
 
 <style scoped>
-.container {
-  padding: 1.5rem;
-  color: white;
-  max-width: 600px;
+/* === GLOBAL === */
+.app {
+  padding: 2rem;
+  max-width: 700px;
   margin: auto;
+  color: #fff;
+  font-family: system-ui;
 }
-.form {
+
+h1, h2 { margin: 0 0 1rem; }
+
+/* === STATUS BAR === */
+.status-bar {
   display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
+  gap: 1rem;
+  align-items: center;
   margin-bottom: 1.5rem;
 }
+
+.online { color: #44ff99; font-weight: bold; }
+.offline { color: #ff5566; font-weight: bold; }
+
+/* === CARDS === */
+.card {
+  background: #1e1e1e;
+  padding: 1.2rem;
+  border-radius: 8px;
+  margin-bottom: 1.5rem;
+  border: 1px solid #333;
+}
+
+/* === INPUTS === */
 input {
-  padding: 0.5rem;
-  border-radius: 4px;
-  border: none;
+  width: 100%;
+  padding: 0.6rem;
+  margin-bottom: 0.8rem;
+  border-radius: 6px;
+  border: 1px solid #444;
+  background: #111;
+  color: white;
 }
-.button-group {
-  display: flex;
-  gap: 0.5rem;
-}
+
+/* === BUTTONS === */
 button {
-  padding: 0.5rem 1rem;
+  padding: 0.6rem 1rem;
   border: none;
   cursor: pointer;
-  border-radius: 4px;
+  border-radius: 6px;
   font-weight: 500;
 }
-.btn-primary {
-  background: #42b883;
-  color: white;
-  flex: 1;
-}
-.btn-primary:hover {
-  background: #2a9d6e;
-}
-.btn-secondary {
-  background: #666;
-  color: white;
-}
-.btn-secondary:hover {
-  background: #555;
-}
-.item {
-  background: #1e1e1e;
-  padding: 1rem;
-  margin-top: 0.5rem;
-  border-radius: 6px;
-  border: 2px solid transparent;
-  transition: all 0.2s;
-}
-.item.selected {
-  border-color: #42b883;
-  background: #252525;
-}
-.actions {
+
+.primary { background: #42b883; }
+.primary:hover { background: #2a9d6e; }
+
+.secondary { background: #666; }
+.secondary:hover { background: #555; }
+
+.danger { background: #ef4444; }
+.danger:hover { background: #dc2626; }
+
+.small { font-size: 0.8rem; padding: 0.4rem 0.7rem; }
+
+.btn-row {
   display: flex;
   gap: 0.5rem;
-  margin-top: 1rem;
 }
-.btn-edit {
-  background: #3b82f6;
-  color: white;
-  flex: 1;
-}
-.btn-edit:hover {
-  background: #2563eb;
-}
-.btn-delete {
-  background: #ef4444;
-  color: white;
-  flex: 1;
-}
-.btn-delete:hover {
-  background: #dc2626;
+
+/* === DOC LIST === */
+.doc {
+  background: #2b2b2b;
+  padding: 1rem;
+  border-radius: 6px;
+  margin-bottom: 1rem;
+  border: 1px solid #333;
+  display: flex;
+  justify-content: space-between;
 }
 </style>
