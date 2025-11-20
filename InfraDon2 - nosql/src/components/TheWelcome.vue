@@ -30,6 +30,7 @@ const postsData = ref<Post[]>([])
 const searchTerm = ref("")
 const online = ref(true)
 const syncing = ref(false)
+const sortByLikes = ref(false)
 
 const newPost = ref<Post>({
   post_name: "",
@@ -45,6 +46,8 @@ const selectedPost = ref<Post | null>(null)
 // Nouveaux états pour les commentaires
 const newComment = ref<{ [key: string]: string }>({})
 const showComments = ref<{ [key: string]: boolean }>({})
+const editingComment = ref<{ [key: string]: number | null }>({})
+const editCommentText = ref<{ [key: string]: string }>({})
 
 // URL CouchDB
 const remoteCouch = "http://admin:170451@localhost:5984/infradon2-eko"
@@ -56,11 +59,16 @@ const initDatabase = async () => {
   const db = new PouchDB("infradon2-eko")
   storage.value = db
 
-  // INDEXATION
+  // INDEXATION sur post_name ET likes pour le tri
   await db.createIndex({
     index: { fields: ["post_name"] }
   })
-  console.log("🔍 Index 'post_name' OK")
+  
+  await db.createIndex({
+    index: { fields: ["likes"] }
+  })
+  
+  console.log("🔍 Index 'post_name' et 'likes' créés")
 
   // Écouter les changements locaux en temps réel
   listenLocalChanges()
@@ -123,27 +131,47 @@ const toggleOnline = async () => {
 
 // ------------------ FETCH ------------------
 const fetchData = async () => {
-  const result = await storage.value.allDocs({ include_docs: true })
-
-  postsData.value = result.rows
-    .map((r: any) => r.doc)
-    .filter((doc: any) => !doc._id.startsWith('_design'))
-    .sort((a: any, b: any) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+  let result
+  
+  if (sortByLikes.value) {
+    // TRI PAR LIKES (décroissant) - Effectué côté base de données
+    result = await storage.value.find({
+      selector: { likes: { $gte: 0 } },
+      sort: [{ likes: "desc" }]
+    })
+    postsData.value = result.docs.filter((doc: any) => !doc._id.startsWith('_design'))
+  } else {
+    // Récupération normale
+    result = await storage.value.allDocs({ include_docs: true })
+    postsData.value = result.rows
+      .map((r: any) => r.doc)
+      .filter((doc: any) => !doc._id.startsWith('_design'))
+      .sort((a: any, b: any) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+  }
 }
 
-// ------------------ SEARCH (INDEXED) ------------------
+// ------------------ SEARCH (INDEXED) - CÔTÉ BASE DE DONNÉES ------------------
 const searchByName = async () => {
   if (searchTerm.value.trim() === "") {
     return fetchData()
   }
 
+  // Recherche effectuée côté base de données avec l'index
   const result = await storage.value.find({
     selector: {
-      post_name: { $regex: searchTerm.value }
+      post_name: { $regex: `(?i)${searchTerm.value}` }
     }
   })
 
   postsData.value = result.docs
+  console.log(`🔍 Recherche effectuée côté DB: ${result.docs.length} résultats`)
+}
+
+// ------------------ TRI PAR LIKES - CÔTÉ BASE DE DONNÉES ------------------
+const toggleSortByLikes = async () => {
+  sortByLikes.value = !sortByLikes.value
+  await fetchData()
+  console.log(`📊 Tri par likes ${sortByLikes.value ? 'activé' : 'désactivé'} - effectué côté DB`)
 }
 
 // ------------------ FACTORY ------------------
@@ -154,22 +182,27 @@ const generateFake = async (n = 50) => {
   for (let i = 0; i < n; i++) {
     docs.push({
       _id: `fake_${base}_${i}`,
-      post_name: `Personne ${i}`,
-      post_content: `Contenu généré automatiquement ${Math.random().toFixed(3)}`,
-      attributes: ["fake", `groupe_${i % 5}`],
-      likes: Math.floor(Math.random() * 50),
+      post_name: `Message ${i}`,
+      post_content: `Contenu du message automatique numéro ${i}. ${Math.random().toFixed(3)}`,
+      attributes: ["auto", `groupe_${i % 5}`],
+      likes: Math.floor(Math.random() * 100),
       comments: [],
-      created_at: new Date().toISOString()
+      created_at: new Date(Date.now() - Math.random() * 10000000000).toISOString()
     })
   }
 
   await storage.value.bulkDocs(docs)
   fetchData()
-  console.log(`🧪 ${n} documents générés`)
+  console.log(`🧪 ${n} messages générés`)
 }
 
-// ------------------ CRUD ------------------
+// ------------------ CRUD POSTS ------------------
 const addPost = async () => {
+  if (!newPost.value.post_name || !newPost.value.post_content) {
+    alert("Le nom et le contenu sont obligatoires")
+    return
+  }
+
   const doc = {
     _id: new Date().toISOString(),
     post_name: newPost.value.post_name,
@@ -183,6 +216,7 @@ const addPost = async () => {
   await storage.value.put(doc)
   resetForm()
   fetchData()
+  console.log("✅ Message ajouté")
 }
 
 const selectPost = (post: Post) => {
@@ -216,11 +250,15 @@ const updatePost = async () => {
   await storage.value.put(doc)
   resetForm()
   fetchData()
+  console.log("✅ Message mis à jour")
 }
 
 const deletePost = async (post: Post) => {
+  if (!confirm("Supprimer ce message ?")) return
+  
   await storage.value.remove(post._id, post._rev)
   fetchData()
+  console.log("🗑️ Message supprimé")
 }
 
 const resetForm = () => {
@@ -241,16 +279,20 @@ const likePost = async (post: Post) => {
   }
   await storage.value.put(updatedPost)
   fetchData()
+  console.log(`👍 Like ajouté au message "${post.post_name}"`)
 }
 
-// ------------------ COMMENTS ------------------
+// ------------------ COMMENTS CRUD ------------------
 const toggleComments = (postId: string) => {
   showComments.value[postId] = !showComments.value[postId]
 }
 
 const addComment = async (post: Post) => {
   const commentText = newComment.value[post._id!]
-  if (!commentText || !commentText.trim()) return
+  if (!commentText || !commentText.trim()) {
+    alert("Le commentaire ne peut pas être vide")
+    return
+  }
 
   const updatedPost = {
     ...post,
@@ -266,28 +308,86 @@ const addComment = async (post: Post) => {
   await storage.value.put(updatedPost)
   newComment.value[post._id!] = ""
   fetchData()
+  console.log(`💬 Commentaire ajouté au message "${post.post_name}"`)
+}
+
+const startEditComment = (postId: string, index: number, text: string) => {
+  editingComment.value[postId] = index
+  editCommentText.value[postId] = text
+}
+
+const cancelEditComment = (postId: string) => {
+  editingComment.value[postId] = null
+  editCommentText.value[postId] = ""
+}
+
+const updateComment = async (post: Post, index: number) => {
+  const newText = editCommentText.value[post._id!]
+  if (!newText || !newText.trim()) {
+    alert("Le commentaire ne peut pas être vide")
+    return
+  }
+
+  const updatedComments = [...(post.comments || [])]
+  updatedComments[index] = {
+    ...updatedComments[index],
+    text: newText
+  }
+
+  const updatedPost = {
+    ...post,
+    comments: updatedComments,
+    updated_at: new Date().toISOString()
+  }
+
+  await storage.value.put(updatedPost)
+  editingComment.value[post._id!] = null
+  editCommentText.value[post._id!] = ""
+  fetchData()
+  console.log(`✏️ Commentaire modifié`)
+}
+
+const deleteComment = async (post: Post, index: number) => {
+  if (!confirm("Supprimer ce commentaire ?")) return
+
+  const updatedComments = [...(post.comments || [])]
+  updatedComments.splice(index, 1)
+
+  const updatedPost = {
+    ...post,
+    comments: updatedComments,
+    updated_at: new Date().toISOString()
+  }
+
+  await storage.value.put(updatedPost)
+  fetchData()
+  console.log(`🗑️ Commentaire supprimé`)
 }
 
 // ------------------ REPLICATION MANUELLE ------------------
 const replicateFromDistant = async () => {
+  console.log("⬇️ Début réplication distante → locale")
   await storage.value.replicate.from(remoteCouch)
   fetchData()
-  console.log("⬇️ Synchronisation distante → locale OK")
+  console.log("✅ Synchronisation distante → locale terminée")
 }
 
 const replicateToDistant = async () => {
+  console.log("⬆️ Début réplication locale → distante")
   await storage.value.replicate.to(remoteCouch)
-  console.log("⬆️ Synchronisation locale → distante OK")
+  console.log("✅ Synchronisation locale → distante terminée")
 }
 
 const manualSync = async () => {
+  console.log("🔁 Synchronisation bidirectionnelle en cours...")
   await replicateFromDistant()
   await replicateToDistant()
-  console.log("🔁 Synchronisation bidirectionnelle OK")
+  console.log("✅ Synchronisation bidirectionnelle terminée")
 }
 
 // ------------------ MOUNT ------------------
 onMounted(async () => {
+  console.log("🚀 Initialisation de l'application")
   await initDatabase()
   fetchData()
 })
@@ -296,16 +396,17 @@ onMounted(async () => {
 <template>
   <div class="app">
 
-    <h1>📡 CouchDB + Vue 3 — Version Complète</h1>
+    <h1>📡 CouchDB + Vue 3 — Application de Messagerie</h1>
+    <p class="subtitle">Infrastructure de Données 2 - TP Réplication & Indexation</p>
 
     <!-- ONLINE/OFFLINE -->
     <section class="status-bar">
       <span :class="online ? 'online' : 'offline'">
-        ● {{ online ? "ONLINE (sync actif)" : "OFFLINE (local uniquement)" }}
+        ● {{ online ? "ONLINE (sync temps réel actif)" : "OFFLINE (mode local uniquement)" }}
       </span>
 
       <button @click="toggleOnline" class="secondary small">
-        Passer en mode {{ online ? 'OFFLINE' : 'ONLINE' }}
+        {{ online ? '📴 Mode Offline' : '📡 Mode Online' }}
       </button>
     </section>
 
@@ -314,93 +415,139 @@ onMounted(async () => {
       <input
         v-model="searchTerm"
         @input="searchByName"
-        placeholder="Rechercher par nom..."
+        placeholder="🔍 Rechercher un message par nom (indexé)..."
       />
-      <button @click="generateFake(50)">+50 docs</button>
+      <button @click="generateFake(50)" class="factory-btn">🧪 +50 messages</button>
+      <button 
+        @click="toggleSortByLikes" 
+        :class="['sort-btn', { active: sortByLikes }]"
+      >
+        {{ sortByLikes ? '📊 Tri: Likes ↓' : '📅 Tri: Date' }}
+      </button>
     </section>
 
     <!-- 🔁 Sync -->
     <div class="sync-buttons">
-      <button class="sync-btn" @click="replicateFromDistant">⬇️ Distant → Local</button>
-      <button class="sync-btn" @click="replicateToDistant">⬆️ Local → Distant</button>
-      <button class="sync-btn" @click="manualSync">🔁 Sync 2 Sens</button>
+      <button class="sync-btn" @click="replicateFromDistant">⬇️ CouchDB → Local</button>
+      <button class="sync-btn" @click="replicateToDistant">⬆️ Local → CouchDB</button>
+      <button class="sync-btn primary-sync" @click="manualSync">🔁 Sync Bidirectionnelle</button>
     </div>
 
     <!-- FORM -->
     <section class="card">
-      <h2>{{ isEditing ? "✏ Modifier" : "➕ Ajouter" }} une personne</h2>
+      <h2>{{ isEditing ? "✏️ Modifier un message" : "➕ Ajouter un message" }}</h2>
 
-      <input v-model="newPost.post_name" placeholder="Nom" />
-      <input v-model="newPost.post_content" placeholder="Contenu" />
+      <input v-model="newPost.post_name" placeholder="Nom du message *" />
+      <textarea 
+        v-model="newPost.post_content" 
+        placeholder="Contenu du message *"
+        rows="4"
+      ></textarea>
       <input
-        :value="newPost.attributes.join(',')"
+        :value="newPost.attributes.join(', ')"
         placeholder="Attributs (séparés par virgule)"
         @input="newPost.attributes = ($event.target as HTMLInputElement).value.split(',').map(s => s.trim()).filter(s => s)"
       />
 
       <div class="btn-row">
         <button @click="handleSubmit" class="primary">
-          {{ isEditing ? "Enregistrer" : "Créer" }}
+          {{ isEditing ? "💾 Enregistrer" : "➕ Créer" }}
         </button>
 
         <button v-if="isEditing" @click="resetForm" class="secondary">
-          Annuler
+          ❌ Annuler
         </button>
       </div>
     </section>
 
     <!-- LISTE -->
     <section class="card">
-      <h2>📃 Documents ({{ postsData.length }})</h2>
+      <div class="header-with-count">
+        <h2>📃 Messages</h2>
+        <span class="count-badge">{{ postsData.length }} message(s)</span>
+      </div>
 
-      <p v-if="postsData.length === 0">Aucun document.</p>
+      <p v-if="postsData.length === 0" class="empty-state">
+        Aucun message. Ajoutez-en un ou utilisez la factory ! 🧪
+      </p>
 
       <article v-for="post in postsData" :key="post._id" class="doc">
         <div class="doc-content">
-          <h3>{{ post.post_name }}</h3>
-          <p>{{ post.post_content }}</p>
+          <div class="doc-header">
+            <h3>{{ post.post_name }}</h3>
+            <div class="likes-display">
+              <button @click="likePost(post)" class="like-btn-inline">
+                👍 <strong>{{ post.likes || 0 }}</strong>
+              </button>
+            </div>
+          </div>
+          
+          <p class="content">{{ post.post_content }}</p>
           
           <div class="attributes" v-if="post.attributes && post.attributes.length">
             <span v-for="attr in post.attributes" :key="attr" class="badge">{{ attr }}</span>
           </div>
 
           <div class="meta">
-            <small>ID: {{ post._id }}</small>
-            <small v-if="post.updated_at">🔄 Maj: {{ new Date(post.updated_at).toLocaleString() }}</small>
+            <small>🆔 {{ post._id }}</small>
+            <small>📅 Créé: {{ new Date(post.created_at!).toLocaleString('fr-FR') }}</small>
+            <small v-if="post.updated_at">🔄 Modifié: {{ new Date(post.updated_at).toLocaleString('fr-FR') }}</small>
           </div>
 
-          <!-- LIKES & COMMENTS -->
+          <!-- INTERACTIONS -->
           <div class="interactions">
-            <button @click="likePost(post)" class="like-btn">
-              👍 {{ post.likes || 0 }}
-            </button>
             <button @click="toggleComments(post._id!)" class="comment-toggle">
-              💬 {{ (post.comments || []).length }} commentaires
+              💬 {{ (post.comments || []).length }} commentaire(s)
             </button>
           </div>
 
           <!-- SECTION COMMENTAIRES -->
           <div v-if="showComments[post._id!]" class="comments-section">
+            <h4>💬 Commentaires</h4>
+            
             <div v-if="post.comments && post.comments.length" class="comments-list">
               <div v-for="(comment, idx) in post.comments" :key="idx" class="comment">
-                <p>{{ comment.text }}</p>
-                <small>{{ new Date(comment.date).toLocaleString() }}</small>
+                <div v-if="editingComment[post._id!] === idx" class="edit-comment">
+                  <textarea 
+                    v-model="editCommentText[post._id!]"
+                    rows="2"
+                  ></textarea>
+                  <div class="btn-row">
+                    <button @click="updateComment(post, idx)" class="primary small">💾 Sauver</button>
+                    <button @click="cancelEditComment(post._id!)" class="secondary small">❌ Annuler</button>
+                  </div>
+                </div>
+                <div v-else>
+                  <p>{{ comment.text }}</p>
+                  <div class="comment-footer">
+                    <small>{{ new Date(comment.date).toLocaleString('fr-FR') }}</small>
+                    <div class="comment-actions">
+                      <button @click="startEditComment(post._id!, idx, comment.text)" class="icon-btn">✏️</button>
+                      <button @click="deleteComment(post, idx)" class="icon-btn danger">🗑️</button>
+                    </div>
+                  </div>
+                </div>
               </div>
             </div>
+            
+            <div v-else class="no-comments">
+              Aucun commentaire pour le moment.
+            </div>
+            
             <div class="add-comment">
               <input 
                 v-model="newComment[post._id!]"
                 placeholder="Ajouter un commentaire..."
                 @keyup.enter="addComment(post)"
               />
-              <button @click="addComment(post)" class="primary small">Envoyer</button>
+              <button @click="addComment(post)" class="primary small">📤 Envoyer</button>
             </div>
           </div>
         </div>
 
-        <div class="btn-row">
-          <button @click="selectPost(post)" class="primary small">Modifier</button>
-          <button @click="deletePost(post)" class="danger small">Supprimer</button>
+        <div class="btn-row doc-actions">
+          <button @click="selectPost(post)" class="primary small">✏️ Modifier</button>
+          <button @click="deletePost(post)" class="danger small">🗑️ Supprimer</button>
         </div>
       </article>
     </section>
@@ -412,13 +559,26 @@ onMounted(async () => {
 /* === GLOBAL === */
 .app {
   padding: 2rem;
-  max-width: 800px;
+  max-width: 900px;
   margin: auto;
   color: #fff;
-  font-family: system-ui;
+  font-family: system-ui, -apple-system, sans-serif;
+  background: #0a0a0a;
+  min-height: 100vh;
 }
 
-h1, h2 { margin-bottom: 1rem; }
+h1 { 
+  margin-bottom: 0.5rem;
+  font-size: 1.8rem;
+}
+
+.subtitle {
+  color: #888;
+  margin-bottom: 2rem;
+  font-size: 0.9rem;
+}
+
+h2 { margin-bottom: 1rem; }
 
 /* === STATUS BAR === */
 .status-bar {
@@ -432,8 +592,17 @@ h1, h2 { margin-bottom: 1rem; }
   border: 1px solid #333;
 }
 
-.online { color: #42b883; font-weight: bold; }
-.offline { color: #ff4d4d; font-weight: bold; }
+.online { 
+  color: #42b883; 
+  font-weight: bold;
+  font-size: 1rem;
+}
+
+.offline { 
+  color: #ff4d4d; 
+  font-weight: bold;
+  font-size: 1rem;
+}
 
 /* === SEARCH BAR === */
 .search-bar {
@@ -444,11 +613,51 @@ h1, h2 { margin-bottom: 1rem; }
 
 .search-bar input {
   flex: 1;
-  padding: 0.6rem;
+  padding: 0.7rem;
   background: #111;
   border: 1px solid #444;
   border-radius: 6px;
   color: white;
+  font-size: 0.95rem;
+}
+
+.factory-btn {
+  background: #6366f1;
+  color: white;
+  padding: 0.7rem 1rem;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.factory-btn:hover {
+  background: #4f46e5;
+}
+
+.sort-btn {
+  background: #374151;
+  color: white;
+  padding: 0.7rem 1rem;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-weight: 500;
+  white-space: nowrap;
+  transition: all 0.2s;
+}
+
+.sort-btn.active {
+  background: #f59e0b;
+}
+
+.sort-btn:hover {
+  background: #4b5563;
+}
+
+.sort-btn.active:hover {
+  background: #d97706;
 }
 
 /* === BUTTONS SYNC === */
@@ -457,21 +666,32 @@ h1, h2 { margin-bottom: 1rem; }
   overflow: hidden;
   border-radius: 8px;
   margin-bottom: 1rem;
+  gap: 1px;
+  background: #111;
 }
 
 .sync-btn {
   flex: 1;
-  background: #d6d6d6;
-  color: #111;
-  padding: 0.7rem 1.2rem;
-  border-right: 1px solid #aaa;
+  background: #2a2a2a;
+  color: white;
+  padding: 0.8rem 1.2rem;
   font-weight: 600;
   border: none;
   cursor: pointer;
   transition: background 0.2s;
 }
-.sync-btn:hover { background: #c0c0c0; }
-.sync-btn:last-child { border-right: none; }
+
+.sync-btn:hover { 
+  background: #3a3a3a; 
+}
+
+.primary-sync {
+  background: #42b883;
+}
+
+.primary-sync:hover {
+  background: #2a9d6e;
+}
 
 /* === CARDS === */
 .card {
@@ -482,15 +702,50 @@ h1, h2 { margin-bottom: 1rem; }
   border: 1px solid #333;
 }
 
+.header-with-count {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 1rem;
+}
+
+.count-badge {
+  background: #42b883;
+  color: white;
+  padding: 0.4rem 0.8rem;
+  border-radius: 20px;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.empty-state {
+  text-align: center;
+  color: #888;
+  padding: 2rem;
+  font-style: italic;
+}
+
 /* === INPUTS === */
-input {
+input, textarea {
   width: 100%;
-  padding: 0.6rem;
+  padding: 0.7rem;
   margin-bottom: 0.8rem;
   border-radius: 6px;
   background: #111;
   color: white;
   border: 1px solid #444;
+  font-family: inherit;
+  font-size: 0.95rem;
+}
+
+textarea {
+  resize: vertical;
+  min-height: 80px;
+}
+
+input:focus, textarea:focus {
+  outline: none;
+  border-color: #42b883;
 }
 
 /* === BUTTONS === */
@@ -501,9 +756,9 @@ button {
   padding: 0.6rem 1rem;
   font-weight: 500;
   transition: all 0.2s;
+  font-size: 0.9rem;
 }
 
-/* === STYLES DES BOUTONS === */
 .primary { background: #42b883; color: white; }
 .primary:hover { background: #2a9d6e; }
 
@@ -515,14 +770,18 @@ button {
 
 .small { font-size: 0.8rem; padding: 0.4rem 0.7rem; }
 
-.btn-row { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+.btn-row { 
+  display: flex; 
+  gap: 0.5rem; 
+  flex-wrap: wrap; 
+}
 
 /* === DOC LIST === */
 .doc {
   background: #2b2b2b;
   padding: 1.5rem;
-  border-radius: 6px;
-  margin-bottom: 1rem;
+  border-radius: 8px;
+  margin-bottom: 1.5rem;
   border: 1px solid #333;
   display: flex;
   flex-direction: column;
@@ -533,14 +792,44 @@ button {
   flex: 1;
 }
 
-.doc h3 {
-  margin: 0 0 0.5rem 0;
-  color: #42b883;
+.doc-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: start;
+  margin-bottom: 0.5rem;
 }
 
-.doc p {
+.doc h3 {
+  margin: 0;
+  color: #42b883;
+  font-size: 1.3rem;
+}
+
+.content {
   margin: 0 0 1rem 0;
-  line-height: 1.5;
+  line-height: 1.6;
+  color: #ddd;
+}
+
+.likes-display {
+  display: flex;
+  align-items: center;
+}
+
+.like-btn-inline {
+  background: #374151;
+  color: white;
+  padding: 0.5rem 1rem;
+  font-size: 1rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  border-radius: 20px;
+}
+
+.like-btn-inline:hover {
+  background: #42b883;
+  transform: scale(1.05);
 }
 
 /* === ATTRIBUTES === */
@@ -552,21 +841,22 @@ button {
 }
 
 .badge {
-  background: #42b883;
+  background: #4f46e5;
   color: white;
-  padding: 0.25rem 0.5rem;
+  padding: 0.3rem 0.6rem;
   border-radius: 4px;
   font-size: 0.75rem;
-  font-weight: 500;
+  font-weight: 600;
 }
 
 /* === META === */
 .meta {
   display: flex;
   flex-direction: column;
-  gap: 0.25rem;
+  gap: 0.3rem;
   margin-bottom: 1rem;
   opacity: 0.7;
+  font-size: 0.85rem;
 }
 
 /* === INTERACTIONS === */
@@ -576,50 +866,99 @@ button {
   margin-bottom: 0.5rem;
 }
 
-.like-btn, .comment-toggle {
+.comment-toggle {
   background: #333;
   color: white;
-  padding: 0.4rem 0.8rem;
-  font-size: 0.85rem;
+  padding: 0.5rem 1rem;
+  font-size: 0.9rem;
 }
 
-.like-btn:hover { background: #42b883; }
-.comment-toggle:hover { background: #444; }
+.comment-toggle:hover { 
+  background: #444; 
+}
+
+.doc-actions {
+  border-top: 1px solid #444;
+  padding-top: 1rem;
+}
 
 /* === COMMENTS === */
 .comments-section {
   margin-top: 1rem;
-  padding: 1rem;
-  background: #1e1e1e;
-  border-radius: 6px;
-  border-left: 3px solid #42b883;
+  padding: 1.5rem;
+  background: #1a1a1a;
+  border-radius: 8px;
+  border-left: 4px solid #42b883;
+}
+
+.comments-section h4 {
+  margin: 0 0 1rem 0;
+  color: #42b883;
 }
 
 .comments-list {
   margin-bottom: 1rem;
+  max-height: 400px;
+  overflow-y: auto;
 }
 
 .comment {
   background: #2b2b2b;
-  padding: 0.75rem;
-  border-radius: 4px;
-  margin-bottom: 0.5rem;
+  padding: 1rem;
+  border-radius: 6px;
+  margin-bottom: 0.75rem;
+  border: 1px solid #333;
 }
 
 .comment p {
-  margin: 0 0 0.25rem 0;
+  margin: 0 0 0.5rem 0;
+  line-height: 1.5;
 }
 
-.comment small {
-  opacity: 0.6;
+.comment-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.comment-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.icon-btn {
+  background: transparent;
+  padding: 0.3rem 0.5rem;
+  font-size: 1rem;
+}
+
+.icon-btn:hover {
+  background: #444;
+}
+
+.icon-btn.danger:hover {
+  background: #ef4444;
+}
+
+.edit-comment textarea {
+  margin-bottom: 0.5rem;
+}
+
+.no-comments {
+  color: #888;
+  font-style: italic;
+  padding: 1rem;
+  text-align: center;
 }
 
 .add-comment {
   display: flex;
   gap: 0.5rem;
+  align-items: end;
 }
 
 .add-comment input {
   margin: 0;
+  flex: 1;
 }
 </style>
