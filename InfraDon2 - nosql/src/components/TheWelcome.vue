@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted } from "vue"
+import { ref, onMounted, onUnmounted } from "vue"
 import PouchDB from "pouchdb"
 import PouchDBFind from "pouchdb-find"
 
@@ -29,7 +29,9 @@ const online = ref(true)
 const syncing = ref(false)
 const sortLikes = ref(false)
 
-const newPost = ref<Post>({ post_name:"", post_content:"", attributes:[], likes:0, comments:[] })
+const newPost = ref<Post>({
+  post_name:"", post_content:"", attributes:[], likes:0, comments:[]
+})
 const isEditing = ref(false)
 const selected = ref<Post|null>(null)
 const remoteCouch = "http://admin:170451@localhost:5984/infradon2-eko"
@@ -52,30 +54,52 @@ const initDB = async () => {
 }
 
 function listenLocal() {
-  storage.value.changes({ since:"now", live:true, include_docs:true })
-    .on("change", fetchPosts)
+  storage.value.changes({
+    since:"now", live:true, include_docs:true
+  }).on("change", fetchPosts)
 }
 
 function startSync() {
+  if (syncHandler) syncHandler.cancel()
   syncing.value = true
   syncHandler = storage.value.sync(remoteCouch, { live:true, retry:true })
     .on("change", fetchPosts)
-    .on("paused", () => (online.value = false))
-    .on("active", () => (online.value = true))
-    .on("error", console.error)
+    .on("paused", (info:any) => {
+      syncing.value = false
+    })
+    .on("active", () => {
+      syncing.value = true
+    })
+    .on("denied", (err:any) => {
+      syncing.value = false
+      console.error('Denied:', err)
+    })
+    .on("error", (err:any) => {
+      online.value = false
+      syncing.value = false
+      console.error('Sync error:', err)
+    })
 }
 
 function stopSync() {
+  if (syncHandler) {
+    syncHandler.cancel()
+    syncHandler = null
+  }
   syncing.value = false
-  syncHandler?.cancel()
 }
 
 async function toggleOnline() {
   online.value = !online.value
-  online.value ? startSync() : stopSync()
+  if (online.value) {
+    startSync()
+  } else {
+    stopSync()
+  }
 }
 
 async function fetchPosts() {
+  if (!storage.value) return
   const result = sortLikes.value
     ? await storage.value.find({ selector:{likes:{$gte:0}}, sort:[{likes:"desc"}] })
     : await storage.value.allDocs({ include_docs:true })
@@ -87,7 +111,9 @@ async function fetchPosts() {
 
 async function searchByName() {
   if (!search.value.trim()) return fetchPosts()
-  const result = await storage.value.find({ selector:{ post_name:{ $regex:`(?i)${search.value}` } } })
+  const result = await storage.value.find({
+    selector:{ post_name:{ $regex:`(?i)${search.value}` } }
+  })
   posts.value = result.docs
 }
 
@@ -110,10 +136,16 @@ async function generateFake(n = factoryCount.value) {
 }
 
 // --- CRUD Posts ---
-async function handleSubmit() { isEditing.value ? updatePost() : addPost() }
+async function handleSubmit() {
+  isEditing.value ? updatePost() : addPost()
+}
 async function addPost() {
   if (!newPost.value.post_name.trim() || !newPost.value.post_content.trim()) return
-  await storage.value.put({ ...newPost.value, _id: new Date().toISOString(), created_at: new Date().toISOString() })
+  await storage.value.put({
+    ...newPost.value,
+    _id: new Date().toISOString(),
+    created_at: new Date().toISOString()
+  })
   resetForm()
   fetchPosts()
 }
@@ -124,7 +156,11 @@ function selectPost(post: Post) {
 }
 async function updatePost() {
   if (!selected.value) return
-  await storage.value.put({ ...selected.value, ...newPost.value, updated_at: new Date().toISOString() })
+  await storage.value.put({
+    ...selected.value,
+    ...newPost.value,
+    updated_at: new Date().toISOString()
+  })
   resetForm()
   fetchPosts()
 }
@@ -145,11 +181,16 @@ async function likePost(post: Post) {
 }
 
 // --- Comments ---
-function toggleComments(id: string) { showComments.value[id] = !showComments.value[id] }
+function toggleComments(id: string) {
+  showComments.value[id] = !showComments.value[id]
+}
 async function addComment(post: Post) {
   const txt = newComment.value[post._id!]?.trim()
   if (!txt) return
-  const updated = { ...post, comments: [...(post.comments||[]), { text: txt, date: new Date().toISOString() }] }
+  const updated = {
+    ...post,
+    comments: [...(post.comments||[]), { text: txt, date: new Date().toISOString() }]
+  }
   await storage.value.put(updated)
   newComment.value[post._id!] = ""
   fetchPosts()
@@ -157,19 +198,28 @@ async function addComment(post: Post) {
 
 // --- Sync Manual ---
 async function replicateFromDistant() {
+  if (!online.value) return
   await storage.value.replicate.from(remoteCouch)
   fetchPosts()
 }
 async function replicateToDistant() {
+  if (!online.value) return
   await storage.value.replicate.to(remoteCouch)
 }
 async function manualSync() {
+  if (!online.value) return
   await replicateFromDistant()
   await replicateToDistant()
   fetchPosts()
 }
 
-onMounted(async () => { await initDB(); fetchPosts() })
+onMounted(async () => {
+  await initDB()
+  await fetchPosts()
+})
+onUnmounted(() => {
+  stopSync()
+})
 </script>
 
 <template>
@@ -190,9 +240,9 @@ onMounted(async () => { await initDB(); fetchPosts() })
       </button>
     </section>
     <section>
-      <button @click="replicateFromDistant">⬇️ CouchDB → Local</button>
-      <button @click="replicateToDistant">⬆️ Local → CouchDB</button>
-      <button @click="manualSync">🔁 Sync Bidirectionnelle</button>
+      <button @click="replicateFromDistant" :disabled="!online">⬇️ CouchDB → Local</button>
+      <button @click="replicateToDistant" :disabled="!online">⬆️ Local → CouchDB</button>
+      <button @click="manualSync" :disabled="!online">🔁 Sync Bidirectionnelle</button>
     </section>
     <section>
       <h2>{{ isEditing ? "Modifier" : "Ajouter" }}</h2>
@@ -229,7 +279,6 @@ onMounted(async () => { await initDB(); fetchPosts() })
   </div>
 </template>
 
-<!-- Style réduit, à adapter selon besoins -->
 <style scoped>
 .app { padding:2rem; color:#fff; background:#111; max-width:700px; margin:auto; }
 .online { color:#42b883; font-weight:bold; }
@@ -237,4 +286,5 @@ onMounted(async () => { await initDB(); fetchPosts() })
 article { background:#222; margin-bottom:1em; padding:1em; border-radius:8px; }
 input, textarea { margin-bottom: .4em; padding:.5em; width:100%; }
 button { margin:.2em .2em 0 0; padding:.4em 1em; border-radius:6px; }
+.active { background:#42b883; color:#fff; }
 </style>
