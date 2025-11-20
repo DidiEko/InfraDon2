@@ -208,11 +208,12 @@ onMounted(async () => {
     </section>
 
     <!-- SYNC BUTTONS -->
-    <div class="sync-row">
-      <button @click="replicateFromDistant">⬇ Distant → Local</button>
-      <button @click="replicateToDistant">⬆ Local → Distant</button>
-      <button @click="manualSync">🔁 Sync (2 sens)</button>
-    </div>
+<div class="sync-buttons">
+  <button class="sync-btn" @click="replicateFromDistant">⬇️ Distant → Local</button>
+  <button class="sync-btn" @click="replicateToDistant">⬆️ Local → Distant</button>
+  <button class="sync-btn" @click="manualSync">🔁 Sync (2 sens)</button>
+</div>
+
 
     <!-- FORM -->
     <section class="card">
@@ -342,5 +343,34 @@ button {
   border: 1px solid #333;
   display: flex;
   justify-content: space-between;
+
+  .sync-buttons {
+  display: flex;
+  gap: 0;
+  margin: 1rem 0;
+  border-radius: 12px;
+  overflow: hidden;
+  width: fit-content;
+}
+
+.sync-btn {
+  background: #d6d6d6;
+  color: #111;
+  padding: 0.7rem 1.2rem;
+  border: none;
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 0.9rem;
+  border-right: 1px solid #aaa;
+}
+
+.sync-btn:last-child {
+  border-right: none;
+}
+
+.sync-btn:hover {
+  background: #c9c9c9;
+}
+
 }
 </style>
