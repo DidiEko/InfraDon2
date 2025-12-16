@@ -19,13 +19,13 @@ interface Post {
 }
 
 // ---------- STATE ----------
-const storage = ref<any>(null)
+const dbAM = ref<any>(null)
+const dbNZ = ref<any>(null)
 const posts = ref<Post[]>([])
 
 const search = ref("")
 const online = ref(true)
 const syncing = ref(false)
-
 const sortMode = ref<"date" | "alpha">("date")
 
 const newPost = ref({
@@ -36,40 +36,52 @@ const newPost = ref({
 
 const isEditing = ref(false)
 const selected = ref<Post | null>(null)
-
 const factoryCount = ref(1)
 
-const remoteCouch = "http://admin:170451@localhost:5984/infradon2-eko"
-let syncHandler: any = null
+const remoteAM = "http://admin:170451@localhost:5984/infradon2-posts-am"
+const remoteNZ = "http://admin:170451@localhost:5984/infradon2-posts-nz"
+
+let syncAM: any = null
+let syncNZ: any = null
+
+// ---------- UTILS ----------
+// ✅ CORRECTION ICI
+function getDBForName(name: string) {
+  const letter = (name?.trim()?.[0] || "").toUpperCase()
+
+  // Sécurité : nom vide ou caractère non alphabétique
+  if (!letter || letter < "A" || letter > "Z") {
+    return dbNZ.value
+  }
+
+  return letter <= "M" ? dbAM.value : dbNZ.value
+}
+
+function escapeRegExp(text: string) {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+}
 
 // ---------- INIT ----------
 const initDB = async () => {
-  storage.value = new PouchDB("infradon2-eko")
+  dbAM.value = new PouchDB("infradon2-posts-am")
+  dbNZ.value = new PouchDB("infradon2-posts-nz")
 
-  await storage.value.createIndex({ index: { fields: ["type"] } })
-  await storage.value.createIndex({ index: { fields: ["type", "post_name"] } })
+  await dbAM.value.createIndex({ index: { fields: ["type", "post_name"] } })
+  await dbNZ.value.createIndex({ index: { fields: ["type", "post_name"] } })
 
-  listenLocal()
   if (online.value) startSync()
 }
 
-function listenLocal() {
-  storage.value.changes({ since: "now", live: true })
-    .on("change", fetchPosts)
-}
-
-// ---------- ONLINE / OFFLINE ----------
+// ---------- SYNC ----------
 function startSync() {
-  if (syncHandler) syncHandler.cancel()
   syncing.value = true
-
-  syncHandler = storage.value.sync(remoteCouch, { live: true, retry: true })
-    .on("paused", () => syncing.value = false)
-    .on("active", () => syncing.value = true)
+  syncAM = dbAM.value.sync(remoteAM, { live: true, retry: true })
+  syncNZ = dbNZ.value.sync(remoteNZ, { live: true, retry: true })
 }
 
 function stopSync() {
-  if (syncHandler) syncHandler.cancel()
+  if (syncAM) syncAM.cancel()
+  if (syncNZ) syncNZ.cancel()
   syncing.value = false
 }
 
@@ -78,13 +90,16 @@ function toggleOnline() {
   online.value = !online.value
 }
 
-// ---------- FETCH + TRI ----------
+// ---------- FETCH ----------
 async function fetchPosts() {
-  const result = await storage.value.find({
-    selector: { type: "post" }
-  })
+  const [resAM, resNZ] = await Promise.all([
+    dbAM.value.find({ selector: { type: "post" } }),
+    dbNZ.value.find({ selector: { type: "post" } })
+  ])
 
-  posts.value = result.docs.sort((a: any, b: any) => {
+  const all = [...resAM.docs, ...resNZ.docs]
+
+  posts.value = all.sort((a: any, b: any) => {
     if (sortMode.value === "alpha") {
       return a.post_name.localeCompare(b.post_name)
     }
@@ -93,21 +108,22 @@ async function fetchPosts() {
 }
 
 // ---------- SEARCH ----------
-function escapeRegExp(text: string) {
-  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
-}
-
 async function searchByName() {
   if (!search.value.trim()) return fetchPosts()
 
   const safe = escapeRegExp(search.value)
   const regex = new RegExp(safe, "i")
 
-  const result = await storage.value.find({
-    selector: { type: "post", post_name: { $regex: regex.source } }
-  })
+  const [resAM, resNZ] = await Promise.all([
+    dbAM.value.find({
+      selector: { type: "post", post_name: { $regex: regex.source } }
+    }),
+    dbNZ.value.find({
+      selector: { type: "post", post_name: { $regex: regex.source } }
+    })
+  ])
 
-  posts.value = result.docs
+  posts.value = [...resAM.docs, ...resNZ.docs]
 }
 
 // ---------- CRUD ----------
@@ -116,9 +132,11 @@ function handleSubmit() {
 }
 
 async function addPost() {
-  if (!newPost.value.post_name || !newPost.value.post_content) return
+  if (!newPost.value.post_name.trim() || !newPost.value.post_content.trim()) return
 
-  await storage.value.put({
+  const db = getDBForName(newPost.value.post_name)
+
+  await db.put({
     _id: `post_${Date.now()}`,
     type: "post",
     post_name: newPost.value.post_name,
@@ -145,7 +163,9 @@ function selectPost(post: Post) {
 async function updatePost() {
   if (!selected.value) return
 
-  await storage.value.put({
+  const db = getDBForName(selected.value.post_name)
+
+  await db.put({
     ...selected.value,
     ...newPost.value,
     updated_at: new Date().toISOString()
@@ -156,7 +176,8 @@ async function updatePost() {
 }
 
 async function deletePost(post: Post) {
-  await storage.value.remove(post)
+  const db = getDBForName(post.post_name)
+  await db.remove(post)
   fetchPosts()
 }
 
@@ -168,36 +189,38 @@ function resetForm() {
 
 // ---------- FACTORY ----------
 async function generateFake() {
-  const docs = []
   for (let i = 0; i < factoryCount.value; i++) {
-    docs.push({
+    const name = `Message ${i + 1}`
+    const db = getDBForName(name)
+
+    await db.put({
       _id: `post_fake_${Date.now()}_${i}`,
       type: "post",
-      post_name: `Message ${i + 1}`,
+      post_name: name,
       post_content: `Contenu ${i + 1}`,
       attributes: ["auto"],
       likes: 0,
       created_at: new Date().toISOString()
     })
   }
-  await storage.value.bulkDocs(docs)
   fetchPosts()
 }
 
 // ---------- EXPORTS ----------
 async function replicateFromDistant() {
-  await storage.value.replicate.from(remoteCouch)
+  await dbAM.value.replicate.from(remoteAM)
+  await dbNZ.value.replicate.from(remoteNZ)
   fetchPosts()
 }
 
 async function replicateToDistant() {
-  await storage.value.replicate.to(remoteCouch)
+  await dbAM.value.replicate.to(remoteAM)
+  await dbNZ.value.replicate.to(remoteNZ)
 }
 
 async function manualSync() {
-  await storage.value.replicate.from(remoteCouch)
-  await storage.value.replicate.to(remoteCouch)
-  fetchPosts()
+  await replicateFromDistant()
+  await replicateToDistant()
 }
 
 // ---------- LIFECYCLE ----------
@@ -211,7 +234,7 @@ onUnmounted(stopSync)
 
 <template>
   <div class="app">
-    <h1>📡 CouchDB + Vue 3</h1>
+    <h1>📡 CouchDB + Vue 3 — Split A–M / N–Z</h1>
 
     <!-- ONLINE / OFFLINE -->
     <section>
@@ -223,7 +246,7 @@ onUnmounted(stopSync)
       </button>
     </section>
 
-    <!-- SEARCH / FACTORY / SORT -->
+    <!-- SEARCH / SORT / FACTORY -->
     <section>
       <input v-model="search" @input="searchByName" placeholder="Rechercher par nom..." />
       <input type="number" v-model="factoryCount" min="1" style="width:80px" />
