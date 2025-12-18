@@ -48,8 +48,8 @@ const isEditing = ref(false)
 const selected = ref<Post | null>(null)
 const factoryCount = ref(1)
 
-const remoteAM = "http://admin:170451@localhost:5984/infradon2-posts-am"
-const remoteNZ = "http://admin:170451@localhost:5984/infradon2-posts-nz"
+const remoteAM = "http://admin:170451@localhost:5984/demont-cindy-am"
+const remoteNZ = "http://admin:170451@localhost:5984/demont-cindy-nz"
 
 let syncAM: any = null
 let syncNZ: any = null
@@ -92,8 +92,8 @@ function escapeRegExp(text: string) {
 
 // ---------- INIT ----------
 const initDB = async () => {
-  dbAM.value = new PouchDB("infradon2-posts-am")
-  dbNZ.value = new PouchDB("infradon2-posts-nz")
+  dbAM.value = new PouchDB("demont-cindy-am")
+  dbNZ.value = new PouchDB("demont-cindy-nz")
 
   // Index de base pour les posts
   await dbAM.value.createIndex({ index: { fields: ["type", "post_name", "likes", "created_at"] } })
